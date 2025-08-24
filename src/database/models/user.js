@@ -9,6 +9,7 @@ class User {
         this.last_name = data.last_name || null;
         this.language_code = data.language_code || null;
         this.is_bot = data.is_bot || false;
+        this.authorized = data.authorized || 0;
         this.created_at = data.created_at || null;
         this.updated_at = data.updated_at || null;
     }
@@ -20,8 +21,8 @@ class User {
      */
     static async create(userData) {
         const sql = `
-            INSERT INTO users (telegram_id, username, first_name, last_name, language_code, is_bot)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (telegram_id, username, first_name, last_name, language_code, is_bot, authorized)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         `;
         
         const params = [
@@ -30,7 +31,8 @@ class User {
             userData.first_name || null,
             userData.last_name || null,
             userData.language_code || null,
-            userData.is_bot || false
+            userData.is_bot || false,
+            userData.authorized || 0
         ];
 
         try {
@@ -120,7 +122,7 @@ class User {
      * @returns {Promise<User>}
      */
     async update(updateData) {
-        const allowedFields = ['username', 'first_name', 'last_name', 'language_code'];
+        const allowedFields = ['username', 'first_name', 'last_name', 'language_code', 'authorized'];
         const updates = [];
         const params = [];
 
@@ -180,6 +182,7 @@ class User {
                 if (userData.first_name !== user.first_name) updateData.first_name = userData.first_name;
                 if (userData.last_name !== user.last_name) updateData.last_name = userData.last_name;
                 if (userData.language_code !== user.language_code) updateData.language_code = userData.language_code;
+                if (userData.authorized !== undefined && userData.authorized !== user.authorized) updateData.authorized = userData.authorized;
 
                 if (Object.keys(updateData).length > 0) {
                     user = await user.update(updateData);
@@ -215,6 +218,59 @@ class User {
     }
 
     /**
+     * Set user authorization status
+     * @param {number} authorized - Authorization status (0 or 1)
+     * @returns {Promise<User>}
+     */
+    async setAuthorized(authorized) {
+        const sql = 'UPDATE users SET authorized = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?';
+        try {
+            await database.run(sql, [authorized, this.id]);
+            this.authorized = authorized;
+            this.updated_at = new Date().toISOString();
+            return this;
+        } catch (error) {
+            throw new Error(`Failed to set authorization status: ${error.message}`);
+        }
+    }
+
+    /**
+     * Check if user is authorized
+     * @returns {boolean}
+     */
+    isAuthorized() {
+        return this.authorized === 1;
+    }
+
+    /**
+     * Find all authorized users
+     * @returns {Promise<Array<User>>}
+     */
+    static async findAuthorized() {
+        const sql = 'SELECT * FROM users WHERE authorized = 1 ORDER BY created_at DESC';
+        try {
+            const rows = await database.all(sql);
+            return rows.map(row => new User(row));
+        } catch (error) {
+            throw new Error(`Failed to find authorized users: ${error.message}`);
+        }
+    }
+
+    /**
+     * Find all unauthorized users
+     * @returns {Promise<Array<User>>}
+     */
+    static async findUnauthorized() {
+        const sql = 'SELECT * FROM users WHERE authorized = 0 ORDER BY created_at DESC';
+        try {
+            const rows = await database.all(sql);
+            return rows.map(row => new User(row));
+        } catch (error) {
+            throw new Error(`Failed to find unauthorized users: ${error.message}`);
+        }
+    }
+
+    /**
      * Convert to JSON
      * @returns {Object}
      */
@@ -227,6 +283,7 @@ class User {
             last_name: this.last_name,
             language_code: this.language_code,
             is_bot: this.is_bot,
+            authorized: this.authorized,
             created_at: this.created_at,
             updated_at: this.updated_at
         };
