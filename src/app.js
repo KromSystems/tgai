@@ -13,6 +13,13 @@ const database = require('./database/connection');
 const User = require('./database/models/user');
 const TelegramModel = require('./database/models/telegram');
 const AuthRequest = require('./database/models/authRequest');
+const HelpMetrics = require('./database/models/helpMetrics');
+
+// Import help components
+const MenuBuilder = require('./components/MenuBuilder');
+const UserTypeDetector = require('./components/UserTypeDetector');
+const ContentProvider = require('./components/ContentProvider');
+const NavigationManager = require('./components/NavigationManager');
 
 // Bot configuration
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -30,6 +37,12 @@ if (!ADMIN_ID) {
 
 // Create bot instance
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+// Initialize help components
+const menuBuilder = new MenuBuilder();
+const userTypeDetector = new UserTypeDetector(ADMIN_ID);
+const contentProvider = new ContentProvider();
+const navigationManager = new NavigationManager(menuBuilder, userTypeDetector, contentProvider);
 
 // Conversation states for authorization flow
 const CONVERSATION_STATES = {
@@ -60,15 +73,53 @@ Object.entries(IMAGES).forEach(([name, imagePath]) => {
 });
 
 /**
- * Initialize database connection
+ * Initialize database connection and ensure admin user exists
  */
 async function initializeDatabase() {
     try {
         await database.connect();
         console.log('Database connected successfully');
+        
+        // Ensure admin user exists in users table for foreign key references
+        await ensureAdminUser();
     } catch (error) {
         console.error('Failed to connect to database:', error);
         process.exit(1);
+    }
+}
+
+/**
+ * Ensure admin user exists in users table for foreign key references
+ */
+async function ensureAdminUser() {
+    try {
+        // Check if admin user exists in users table
+        let adminUser = await User.findByTelegramId(ADMIN_ID);
+        
+        if (!adminUser) {
+            console.log(`Creating admin user record for ID: ${ADMIN_ID}`);
+            // Create admin user record
+            adminUser = await User.create({
+                telegram_id: ADMIN_ID,
+                username: 'admin',
+                first_name: 'Admin',
+                last_name: 'Bot',
+                authorized: 1
+            });
+            console.log(`Admin user created in users table with ID: ${adminUser.id}`);
+        } else {
+            console.log(`Admin user already exists in users table with ID: ${adminUser.id}`);
+            // Ensure admin is authorized
+            if (!adminUser.isAuthorized()) {
+                await adminUser.setAuthorized(1);
+                console.log('Admin authorization status updated');
+            }
+        }
+        
+        return adminUser;
+    } catch (error) {
+        console.error('Error ensuring admin user exists:', error);
+        throw error;
     }
 }
 
@@ -305,8 +356,14 @@ async function handleApproval(callbackQuery) {
             return;
         }
         
-        // Update request status
-        await authRequest.updateStatus('approved', ADMIN_ID);
+        // Get admin user database ID (not Telegram ID)
+        const adminUser = await User.findByTelegramId(ADMIN_ID);
+        if (!adminUser) {
+            throw new Error('Admin user not found in database');
+        }
+        
+        // Update request status with admin user's database ID
+        await authRequest.updateStatus('approved', adminUser.id);
         
         // Update user authorization status
         const user = await User.findById(authRequest.user_id);
@@ -364,8 +421,14 @@ async function handleRejection(callbackQuery) {
             return;
         }
         
-        // Update request status
-        await authRequest.updateStatus('rejected', ADMIN_ID);
+        // Get admin user database ID (not Telegram ID)
+        const adminUser = await User.findByTelegramId(ADMIN_ID);
+        if (!adminUser) {
+            throw new Error('Admin user not found in database');
+        }
+        
+        // Update request status with admin user's database ID
+        await authRequest.updateStatus('rejected', adminUser.id);
         
         // Notify user about rejection with option to reapply
         const keyboard = {
@@ -403,6 +466,110 @@ async function handleRejection(callbackQuery) {
     }
 }
 
+/**
+ * Handle /help command
+ */
+async function handleHelpCommand(msg) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+    const startTime = Date.now();
+    
+    const userData = {
+        telegram_id: telegramId,
+        username: msg.from.username,
+        first_name: msg.from.first_name,
+        last_name: msg.from.last_name,
+        language_code: msg.from.language_code,
+        is_bot: msg.from.is_bot || false
+    };
+
+    try {
+        // Save telegram data
+        await TelegramModel.createOrUpdate({
+            ...userData,
+            is_premium: msg.from.is_premium,
+            added_to_attachment_menu: msg.from.added_to_attachment_menu,
+            can_join_groups: msg.from.can_join_groups,
+            can_read_all_group_messages: msg.from.can_read_all_group_messages,
+            supports_inline_queries: msg.from.supports_inline_queries
+        });
+
+        // Get or create user
+        const user = await User.findOrCreate(userData);
+        
+        // Determine user type
+        const userType = userTypeDetector.detectUserType(telegramId, user);
+        
+        // Get auth request for unauthorized users
+        let authRequest = null;
+        if (userType === 'unauthorized') {
+            authRequest = await AuthRequest.findByTelegramId(telegramId);
+        }
+        
+        // Build appropriate menu
+        let menuData;
+        switch (userType) {
+            case 'admin':
+                menuData = menuBuilder.buildAdminMenu(user);
+                break;
+            case 'authorized':
+                menuData = menuBuilder.buildUserMenu(user);
+                break;
+            case 'unauthorized':
+                menuData = menuBuilder.buildGuestMenu(user, authRequest);
+                break;
+            default:
+                throw new Error('Unknown user type');
+        }
+
+        // Add motivational message
+        const motivationalMessage = contentProvider.getMotivationalMessage(userType);
+        menuData.text += `\n\n${motivationalMessage}`;
+
+        // Send menu with typing effect
+        await bot.sendChatAction(chatId, 'typing');
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay for typing effect
+        
+        const sentMessage = await bot.sendMessage(chatId, menuData.text, {
+            reply_markup: menuData.keyboard,
+            parse_mode: 'HTML'
+        });
+
+        // Add sparkle reaction
+        try {
+            await bot.setMessageReaction(chatId, sentMessage.message_id, [{ type: 'emoji', emoji: '✨' }]);
+        } catch (reactionError) {
+            // Reactions might not be supported in all chats, silently ignore
+        }
+
+        // Record metrics
+        const responseTime = Date.now() - startTime;
+        await HelpMetrics.record({
+            telegram_id: telegramId,
+            user_type: userType,
+            menu_section: 'main',
+            action: 'view',
+            response_time: responseTime
+        });
+
+        console.log(`User ${telegramId} (${userType}) used /help command (${responseTime}ms)`);
+    } catch (error) {
+        console.error('Error handling /help command:', error);
+        
+        // Send fallback message
+        const fallbackMessage = contentProvider.getErrorMessage('general', error.message);
+        await bot.sendMessage(chatId, fallbackMessage);
+        
+        // Record error metric
+        await HelpMetrics.record({
+            telegram_id: telegramId,
+            user_type: 'unknown',
+            menu_section: 'error',
+            action: 'view',
+            response_time: Date.now() - startTime
+        });
+    }
+}
 /**
  * Handle /start command
  */
@@ -477,17 +644,47 @@ function setupBotHandlers() {
     // Handle /start command
     bot.onText(/\/start/, handleStartCommand);
     
+    // Handle /help command
+    bot.onText(/\/help/, handleHelpCommand);
+    
     // Handle callback queries (inline buttons)
     bot.on('callback_query', async (callbackQuery) => {
         const data = callbackQuery.data;
+        const telegramId = callbackQuery.from.id;
         
         try {
+            // Handle help-related callbacks
+            if (data.startsWith('help_')) {
+                // Get user for help navigation
+                const user = await User.findByTelegramId(telegramId);
+                
+                // Record navigation metric
+                const userType = userTypeDetector.detectUserType(telegramId, user);
+                await HelpMetrics.record({
+                    telegram_id: telegramId,
+                    user_type: userType,
+                    menu_section: data,
+                    action: 'click'
+                });
+                
+                // Handle navigation
+                await navigationManager.handleCallback(callbackQuery, user, bot);
+                return;
+            }
+            
+            // Handle existing authorization callbacks
             if (data === 'start_authorization') {
                 await handleAuthorizationStart(callbackQuery);
             } else if (data.startsWith('approve_')) {
                 await handleApproval(callbackQuery);
             } else if (data.startsWith('reject_')) {
                 await handleRejection(callbackQuery);
+            } else {
+                // Unknown callback
+                await bot.answerCallbackQuery(callbackQuery.id, {
+                    text: '❓ Неизвестная команда',
+                    show_alert: true
+                });
             }
         } catch (error) {
             console.error('Error handling callback query:', error);

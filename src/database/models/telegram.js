@@ -36,6 +36,7 @@ class TelegramModel {
             
             if (existing) {
                 // Update existing record
+                console.log(`Updating existing telegram record for ID: ${telegram_id}`);
                 const result = await database.run(
                     `UPDATE ${this.tableName} SET 
                         username = ?, 
@@ -59,9 +60,11 @@ class TelegramModel {
                     ]
                 );
                 
+                console.log(`Successfully updated telegram record for ID: ${telegram_id}`);
                 return await this.findByTelegramId(telegram_id);
             } else {
-                // Create new record
+                // Create new record only if none exists
+                console.log(`Creating new telegram record for ID: ${telegram_id}`);
                 const result = await database.run(
                     `INSERT INTO ${this.tableName} (
                         telegram_id, username, first_name, last_name, language_code, 
@@ -76,10 +79,26 @@ class TelegramModel {
                     ]
                 );
                 
+                console.log(`Successfully created telegram record for ID: ${telegram_id}`);
                 return await this.findById(result.id);
             }
         } catch (error) {
             console.error('Error creating/updating telegram data:', error);
+            
+            // If we get a UNIQUE constraint error, try to fetch the existing record
+            if (error.code === 'SQLITE_CONSTRAINT' && error.message.includes('UNIQUE')) {
+                console.log(`UNIQUE constraint hit, fetching existing record for ID: ${telegram_id}`);
+                try {
+                    const existing = await this.findByTelegramId(telegram_id);
+                    if (existing) {
+                        console.log(`Found existing record, returning it`);
+                        return existing;
+                    }
+                } catch (fetchError) {
+                    console.error('Error fetching existing record after UNIQUE constraint:', fetchError);
+                }
+            }
+            
             throw error;
         }
     }
