@@ -1,0 +1,28 @@
+{
+  "name": "tgai",
+  "version": "1.0.0",
+  "description": "Telegram Bot Node.js Application with SQLite Database",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/",
+    "db:migrate": "node scripts/migrate.js"
+  },
+  "keywords": ["telegram", "bot", "nodejs", "sqlite", "api"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "sqlite3": "^5.1.6",
+    "dotenv": "^16.3.1",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.1",
+    "eslint": "^8.54.0"
+  }
+}
