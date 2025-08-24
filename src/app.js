@@ -25,6 +25,7 @@ const ProfileHandler = require('./components/ProfileHandler');
 // Import garage components
 const GarageManager = require('./components/GarageManager');
 const AdminNotifier = require('./components/AdminNotifier');
+const CarManager = require('./components/CarManager');
 
 // Bot configuration
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -53,6 +54,7 @@ const profileHandler = new ProfileHandler(ADMIN_ID);
 // Initialize garage components
 const garageManager = new GarageManager(bot, ADMIN_ID);
 const adminNotifier = new AdminNotifier(bot, ADMIN_ID);
+const carManager = new CarManager(bot, ADMIN_ID);
 
 // Conversation states for authorization flow
 const CONVERSATION_STATES = {
@@ -677,6 +679,16 @@ function setupBotHandlers() {
         }
     });
     
+    // Handle /garage_admin command (car management for admins)
+    bot.onText(/\/garage_admin/, async (msg) => {
+        try {
+            await carManager.handleGarageAdminCommand(msg);
+        } catch (error) {
+            console.error('Error handling /garage_admin command:', error);
+            await bot.sendMessage(msg.chat.id, 'Произошла ошибка при загрузке панели администрирования. Попробуйте позже.');
+        }
+    });
+    
     // Handle callback queries (inline buttons)
     bot.on('callback_query', async (callbackQuery) => {
         const data = callbackQuery.data;
@@ -735,6 +747,10 @@ function setupBotHandlers() {
                 await adminNotifier.handleAdminRejection(callbackQuery);
             } else if (data.startsWith('garage_details_')) {
                 await adminNotifier.handleRequestDetails(callbackQuery);
+            }
+            // Handle car management admin callbacks
+            else if (data.startsWith('admin_')) {
+                await carManager.handleAdminCallback(callbackQuery);
             } else if (data === 'back_to_main') {
                 // Handle return to main menu
                 await bot.answerCallbackQuery(callbackQuery.id);
@@ -780,6 +796,15 @@ function setupBotHandlers() {
                 const adminSession = adminNotifier.getAdminSession(telegramId);
                 if (adminSession && adminSession.state === 'awaiting_rejection_reason') {
                     await adminNotifier.handleRejectionReason(msg);
+                    return;
+                }
+            }
+            
+            // Handle car manager admin sessions
+            if (msg.text) {
+                const adminSession = carManager.getAdminSession(telegramId);
+                if (adminSession && adminSession.state === carManager.ADMIN_STATES.AWAITING_CAR_NAME) {
+                    await carManager.processNewCarName(msg);
                     return;
                 }
             }

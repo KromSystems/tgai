@@ -290,6 +290,120 @@ class Garage {
             throw new Error(`Ошибка получения истории обслуживания: ${error.message}`);
         }
     }
+
+    /**
+     * Получить следующий доступный ID для нового автомобиля
+     * @returns {Promise<number>}
+     */
+    static async getNextCarId() {
+        const sql = 'SELECT MAX(car_id) as maxId FROM garage';
+        try {
+            const result = await database.get(sql);
+            return (result.maxId || 0) + 1;
+        } catch (error) {
+            throw new Error(`Ошибка получения следующего ID: ${error.message}`);
+        }
+    }
+
+    /**
+     * Добавить новый автомобиль
+     * @param {string} carName - Название автомобиля
+     * @param {string} status - Начальный статус ('Хорошее', 'Среднее', 'Плохое')
+     * @returns {Promise<Garage>}
+     */
+    static async addCar(carName, status = 'Хорошее') {
+        // Валидация названия
+        if (!carName || carName.trim().length === 0) {
+            throw new Error('Название автомобиля не может быть пустым');
+        }
+        
+        if (carName.length > 50) {
+            throw new Error('Название автомобиля слишком длинное (максимум 50 символов)');
+        }
+
+        // Валидация статуса
+        const validStatuses = ['Хорошее', 'Среднее', 'Плохое'];
+        if (!validStatuses.includes(status)) {
+            throw new Error(`Недопустимый статус: ${status}. Допустимые: ${validStatuses.join(', ')}`);
+        }
+
+        const nextId = await this.getNextCarId();
+        const sql = `
+            INSERT INTO garage (car_id, car_name, status, last_maintenance) 
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        `;
+        
+        try {
+            await database.run(sql, [nextId, carName.trim(), status]);
+            return await this.findById(nextId);
+        } catch (error) {
+            throw new Error(`Ошибка добавления автомобиля: ${error.message}`);
+        }
+    }
+
+    /**
+     * Удалить автомобиль
+     * @param {number} carId - ID автомобиля
+     * @returns {Promise<boolean>}
+     */
+    static async deleteCar(carId) {
+        // Проверяем, существует ли автомобиль
+        const car = await this.findById(carId);
+        if (!car) {
+            throw new Error(`Автомобиль с ID ${carId} не найден`);
+        }
+
+        // Проверяем, есть ли связанные заявки
+        const requestsCountSql = 'SELECT COUNT(*) as count FROM garage_requests WHERE car_id = ?';
+        const requestsResult = await database.get(requestsCountSql, [carId]);
+        
+        if (requestsResult.count > 0) {
+            throw new Error(`Нельзя удалить автомобиль ${car.car_name}: существуют связанные заявки (${requestsResult.count})`);
+        }
+
+        const sql = 'DELETE FROM garage WHERE car_id = ?';
+        try {
+            const result = await database.run(sql, [carId]);
+            if (result.changes === 0) {
+                throw new Error(`Автомобиль с ID ${carId} не найден`);
+            }
+            return true;
+        } catch (error) {
+            throw new Error(`Ошибка удаления автомобиля: ${error.message}`);
+        }
+    }
+
+    /**
+     * Обновить название автомобиля
+     * @param {number} carId - ID автомобиля
+     * @param {string} newName - Новое название
+     * @returns {Promise<void>}
+     */
+    static async updateName(carId, newName) {
+        // Валидация названия
+        if (!newName || newName.trim().length === 0) {
+            throw new Error('Название автомобиля не может быть пустым');
+        }
+        
+        if (newName.length > 50) {
+            throw new Error('Название автомобиля слишком длинное (максимум 50 символов)');
+        }
+
+        const sql = `
+            UPDATE garage 
+            SET car_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE car_id = ?
+        `;
+
+        try {
+            const result = await database.run(sql, [newName.trim(), carId]);
+            if (result.changes === 0) {
+                throw new Error(`Автомобиль с ID ${carId} не найден`);
+            }
+        } catch (error) {
+            throw new Error(`Ошибка обновления названия автомобиля: ${error.message}`);
+        }
+    }
 }
 
 module.exports = Garage;

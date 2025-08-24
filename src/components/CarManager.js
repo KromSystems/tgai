@@ -1,406 +1,693 @@
 const Garage = require('../database/models/garage');
+const User = require('../database/models/user');
 const GarageRequest = require('../database/models/garageRequest');
 
 /**
- * CarManager - компонент для управления автомобилями
- * Обеспечивает бизнес-логику работы с автомобилями в гараже
+ * CarManager - компонент для административного управления автомобилями в гараже
+ * Обрабатывает команду /garage_admin и предоставляет удобный интерфейс управления
  */
 class CarManager {
-    constructor() {
-        // Конфигурация статусов
-        this.STATUS_PRIORITIES = {
-            'Плохое': 3,
-            'Среднее': 2,
-            'Хорошее': 1
+    constructor(bot, adminIds) {
+        this.bot = bot;
+        this.adminIds = Array.isArray(adminIds) ? adminIds : [adminIds];
+        this.adminSessions = new Map(); // Хранилище состояний администраторов
+        this.SESSION_TIMEOUT = 30 * 60 * 1000; // 30 минут
+        
+        // Состояния администраторского интерфейса
+        this.ADMIN_STATES = {
+            AWAITING_CAR_NAME: 'admin_awaiting_car_name',
+            AWAITING_NEW_CAR_NAME: 'admin_awaiting_new_car_name',
+            CONFIRMING_DELETE: 'admin_confirming_delete'
         };
 
-        this.STATUS_COLORS = {
-            'Плохое': '🔴',
-            'Среднее': '🟡',
-            'Хорошее': '🟢'
+        // Сообщения интерфейса
+        this.ADMIN_MESSAGES = {
+            ACCESS_DENIED: '❌ Доступ запрещен! Эта команда доступна только администраторам.',
+            MAIN_MENU: '🔧 АДМИН ПАНЕЛЬ ГАРАЖА',
+            CAR_ADDED: '✅ Автомобиль "{name}" успешно добавлен!',
+            CAR_DELETED: '🗑️ Автомобиль "{name}" успешно удален!',
+            STATUS_UPDATED: '✅ Статус автомобиля "{name}" изменен на {status}',
+            NAME_UPDATED: '✅ Название автомобиля изменено на "{name}"',
+            ENTER_CAR_NAME: '📝 Введите название нового автомобиля:',
+            SELECT_STATUS: '🎨 Выберите начальный статус автомобиля:',
+            CONFIRM_DELETE: '⚠️ Вы уверены, что хотите удалить автомобиль "{name}"?',
+            ENTER_NEW_NAME: '📝 Введите новое название для автомобиля "{name}":',
+            CAR_NOT_FOUND: '❌ Автомобиль не найден',
+            ERROR_OCCURRED: '❌ Произошла ошибка: {error}'
         };
 
-        this.MAINTENANCE_RECOMMENDATIONS = {
-            'Плохое': 'Срочно требуется замена масла!',
-            'Среднее': 'Рекомендуется замена масла в ближайшее время',
-            'Хорошее': 'Состояние масла хорошее'
-        };
+        // Настройка автоочистки сессий
+        setInterval(() => this.cleanupExpiredSessions(), 5 * 60 * 1000);
     }
 
     /**
-     * Получить все автомобили
-     * @returns {Promise<Array<Garage>>}
+     * Проверить, является ли пользователь администратором
+     * @param {number} telegramId - ID пользователя в Telegram
+     * @returns {boolean}
      */
-    async getAllCars() {
+    isAdmin(telegramId) {
+        return this.adminIds.includes(telegramId);
+    }
+
+    /**
+     * Обработать команду /garage_admin
+     * @param {Object} msg - Сообщение от Telegram
+     */
+    async handleGarageAdminCommand(msg) {
+        const chatId = msg.chat.id;
+        const telegramId = msg.from.id;
+
         try {
-            return await Garage.getAllCars();
+            // Проверяем права администратора
+            if (!this.isAdmin(telegramId)) {
+                await this.bot.sendMessage(chatId, this.ADMIN_MESSAGES.ACCESS_DENIED);
+                return;
+            }
+
+            // Показываем главное меню администратора
+            await this.showAdminMenu(chatId);
+            
         } catch (error) {
-            throw new Error(`Ошибка получения списка автомобилей: ${error.message}`);
+            console.error('Ошибка обработки команды /garage_admin:', error);
+            await this.bot.sendMessage(chatId, 
+                this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', 'Попробуйте позже')
+            );
         }
     }
 
     /**
-     * Получить автомобиль по ID
-     * @param {number} carId - ID автомобиля
-     * @returns {Promise<Garage|null>}
+     * Показать главное административное меню
+     * @param {number} chatId - ID чата
      */
-    async getCarById(carId) {
+    async showAdminMenu(chatId) {
         try {
-            return await Garage.findById(carId);
+            // Получаем статистику
+            const stats = await Garage.getStatistics();
+            const pendingRequests = await GarageRequest.countByStatus('Не выплачено');
+
+            const messageText = 
+                `${this.ADMIN_MESSAGES.MAIN_MENU}\n\n` +
+                `📊 Статистика: ${stats.total} машин\n` +
+                `🟢 Хорошее: ${stats['Хорошее']} автомобилей\n` +
+                `🟡 Среднее: ${stats['Среднее']} автомобилей\n` +
+                `🔴 Плохое: ${stats['Плохое']} автомобилей\n\n` +
+                `📋 Заявок на рассмотрении: ${pendingRequests}`;
+
+            const keyboard = this.buildAdminKeyboard(pendingRequests);
+
+            await this.bot.sendMessage(chatId, messageText, {
+                reply_markup: {
+                    inline_keyboard: keyboard
+                }
+            });
+
         } catch (error) {
-            throw new Error(`Ошибка получения автомобиля: ${error.message}`);
+            console.error('Ошибка показа административного меню:', error);
+            throw error;
         }
     }
 
     /**
-     * Получить автомобили с пагинацией
+     * Построить клавиатуру главного меню администратора
+     * @param {number} pendingRequests - Количество необработанных заявок
+     * @returns {Array} Клавиатура
+     */
+    buildAdminKeyboard(pendingRequests = 0) {
+        const requestText = pendingRequests > 0 
+            ? `📋 Заявки (${pendingRequests})` 
+            : '📋 Заявки';
+
+        return [
+            [
+                { text: '📊 Статистика', callback_data: 'admin_stats' },
+                { text: '🔧 Управление', callback_data: 'admin_manage' }
+            ],
+            [
+                { text: '➕ Добавить авто', callback_data: 'admin_add_car' },
+                { text: requestText, callback_data: 'admin_requests' }
+            ],
+            [
+                { text: '🏠 Главное меню', callback_data: 'back_to_main' }
+            ]
+        ];
+    }
+
+    /**
+     * Показать управление автомобилями с пагинацией
+     * @param {number} chatId - ID чата
      * @param {number} page - Номер страницы
-     * @param {number} pageSize - Размер страницы
-     * @returns {Promise<Object>}
+     * @param {number} messageId - ID сообщения для редактирования (опционально)
      */
-    async getCarsPaginated(page = 0, pageSize = 5) {
+    async showCarManagement(chatId, page = 0, messageId = null) {
         try {
-            return await Garage.getCarsPaginated(page, pageSize);
-        } catch (error) {
-            throw new Error(`Ошибка получения автомобилей с пагинацией: ${error.message}`);
-        }
-    }
+            const pageSize = 5;
+            const carsData = await Garage.getCarsPaginated(page, pageSize);
+            const { cars, pagination } = carsData;
 
-    /**
-     * Обновить статус автомобиля
-     * @param {number} carId - ID автомобиля
-     * @param {string} status - Новый статус
-     * @returns {Promise<void>}
-     */
-    async updateCarStatus(carId, status) {
-        try {
-            await Garage.updateStatus(carId, status);
-        } catch (error) {
-            throw new Error(`Ошибка обновления статуса автомобиля: ${error.message}`);
-        }
-    }
+            if (cars.length === 0) {
+                const message = '🚗 Гараж пуст! Добавьте первый автомобиль.';
+                const keyboard = [[
+                    { text: '➕ Добавить авто', callback_data: 'admin_add_car' },
+                    { text: '⬅️ Назад', callback_data: 'admin_menu' }
+                ]];
 
-    /**
-     * Получить автомобили по статусу
-     * @param {string} status - Статус для фильтрации
-     * @returns {Promise<Array<Garage>>}
-     */
-    async getCarsByStatus(status) {
-        try {
-            return await Garage.getByStatus(status);
-        } catch (error) {
-            throw new Error(`Ошибка получения автомобилей по статусу: ${error.message}`);
-        }
-    }
-
-    /**
-     * Получить автомобили, нуждающиеся в обслуживании
-     * @returns {Promise<Array<Object>>}
-     */
-    async getCarsNeedingMaintenance() {
-        try {
-            const allCars = await this.getAllCars();
-            const needMaintenance = [];
-
-            for (const car of allCars) {
-                if (car.isMaintenanceNeeded()) {
-                    const priority = this.getMaintenancePriority(car);
-                    needMaintenance.push({
-                        car,
-                        priority,
-                        recommendation: this.MAINTENANCE_RECOMMENDATIONS[car.status],
-                        urgency: this.getUrgencyLevel(car)
+                if (messageId) {
+                    await this.bot.editMessageText(message, {
+                        chat_id: chatId,
+                        message_id: messageId,
+                        reply_markup: { inline_keyboard: keyboard }
+                    });
+                } else {
+                    await this.bot.sendMessage(chatId, message, {
+                        reply_markup: { inline_keyboard: keyboard }
                     });
                 }
+                return;
             }
 
-            // Сортируем по приоритету (самые важные сначала)
-            return needMaintenance.sort((a, b) => b.priority - a.priority);
+            // Формируем текст сообщения
+            let messageText = `🔧 УПРАВЛЕНИЕ АВТОМОБИЛЯМИ (Страница ${pagination.currentPage + 1}/${pagination.totalPages})\n\n`;
+            
+            cars.forEach((car, index) => {
+                const number = pagination.currentPage * pageSize + index + 1;
+                messageText += `${number}. ${car.getDisplayName()}\n`;
+            });
+
+            // Формируем клавиатуру
+            const keyboard = this.buildCarManagementKeyboard(cars, pagination);
+
+            if (messageId) {
+                await this.bot.editMessageText(messageText, {
+                    chat_id: chatId,
+                    message_id: messageId,
+                    reply_markup: { inline_keyboard: keyboard }
+                });
+            } else {
+                await this.bot.sendMessage(chatId, messageText, {
+                    reply_markup: { inline_keyboard: keyboard }
+                });
+            }
+
         } catch (error) {
-            throw new Error(`Ошибка получения автомобилей для обслуживания: ${error.message}`);
+            console.error('Ошибка показа управления автомобилями:', error);
+            throw error;
         }
     }
 
     /**
-     * Получить приоритет обслуживания автомобиля
-     * @param {Garage} car - Автомобиль
-     * @returns {number}
+     * Построить клавиатуру для управления автомобилями
+     * @param {Array} cars - Список автомобилей
+     * @param {Object} pagination - Информация о пагинации
+     * @returns {Array} Клавиатура
      */
-    getMaintenancePriority(car) {
-        const statusPriority = this.STATUS_PRIORITIES[car.status] || 0;
-        
-        // Добавляем приоритет на основе времени последнего обслуживания
-        let timePriority = 0;
-        if (car.last_maintenance) {
-            const lastMaintenance = new Date(car.last_maintenance);
-            const now = new Date();
-            const daysSinceLastMaintenance = Math.floor((now - lastMaintenance) / (1000 * 60 * 60 * 24));
+    buildCarManagementKeyboard(cars, pagination) {
+        const keyboard = [];
+
+        // Кнопки редактирования автомобилей (по 2 в ряду)
+        for (let i = 0; i < cars.length; i += 2) {
+            const row = [];
             
-            if (daysSinceLastMaintenance > 30) timePriority = 3;
-            else if (daysSinceLastMaintenance > 14) timePriority = 2;
-            else if (daysSinceLastMaintenance > 7) timePriority = 1;
-        } else {
-            timePriority = 3; // Если никогда не обслуживался
+            const car1 = cars[i];
+            row.push({
+                text: '✏️ Изменить',
+                callback_data: `admin_edit_${car1.car_id}`
+            });
+
+            if (i + 1 < cars.length) {
+                const car2 = cars[i + 1];
+                row.push({
+                    text: '✏️ Изменить',
+                    callback_data: `admin_edit_${car2.car_id}`
+                });
+            }
+
+            keyboard.push(row);
         }
 
-        return statusPriority + timePriority;
+        // Кнопки навигации
+        const navRow = [];
+        if (pagination.hasPrev) {
+            navRow.push({
+                text: '⬅️ Назад',
+                callback_data: `admin_manage_page_${pagination.currentPage - 1}`
+            });
+        }
+        if (pagination.hasNext) {
+            navRow.push({
+                text: '➡️ Далее',
+                callback_data: `admin_manage_page_${pagination.currentPage + 1}`
+            });
+        }
+
+        if (navRow.length > 0) {
+            keyboard.push(navRow);
+        }
+
+        // Нижний ряд кнопок
+        keyboard.push([
+            { text: '➕ Добавить авто', callback_data: 'admin_add_car' },
+            { text: '🏠 Главное меню', callback_data: 'admin_menu' }
+        ]);
+
+        return keyboard;
     }
 
     /**
-     * Получить уровень срочности
-     * @param {Garage} car - Автомобиль
-     * @returns {string}
+     * Показать меню редактирования автомобиля
+     * @param {Object} callbackQuery - Callback query от Telegram
      */
-    getUrgencyLevel(car) {
-        const priority = this.getMaintenancePriority(car);
-        
-        if (priority >= 5) return 'Критично';
-        if (priority >= 3) return 'Высокий';
-        if (priority >= 2) return 'Средний';
-        return 'Низкий';
-    }
+    async handleCarEdit(callbackQuery) {
+        const chatId = callbackQuery.message.chat.id;
+        const carId = parseInt(callbackQuery.data.split('_')[2]);
 
-    /**
-     * Получить статистику автомобилей
-     * @returns {Promise<Object>}
-     */
-    async getCarStatistics() {
         try {
-            const stats = await Garage.getStatistics();
-            const needMaintenance = await this.getCarsNeedingMaintenance();
-            
-            return {
-                ...stats,
-                needMaintenance: needMaintenance.length,
-                critical: needMaintenance.filter(item => item.urgency === 'Критично').length,
-                maintenanceRate: stats.total > 0 ? Math.round((needMaintenance.length / stats.total) * 100) : 0
-            };
+            const car = await Garage.findById(carId);
+            if (!car) {
+                await this.bot.answerCallbackQuery(callbackQuery.id, {
+                    text: this.ADMIN_MESSAGES.CAR_NOT_FOUND,
+                    show_alert: true
+                });
+                return;
+            }
+
+            const messageText = 
+                `🚗 РЕДАКТИРОВАНИЕ АВТОМОБИЛЯ\n\n` +
+                `📛 Название: ${car.car_name}\n` +
+                `📊 Статус: ${car.getDisplayName()}\n` +
+                `🔧 Последнее ТО: ${car.last_maintenance ? new Date(car.last_maintenance).toLocaleDateString() : 'Не указано'}`;
+
+            const keyboard = [
+                [
+                    { text: '🎨 Изменить статус', callback_data: `admin_status_${carId}` },
+                    { text: '✏️ Изменить название', callback_data: `admin_name_${carId}` }
+                ],
+                [
+                    { text: '🗑️ Удалить авто', callback_data: `admin_delete_${carId}` }
+                ],
+                [
+                    { text: '⬅️ Назад к списку', callback_data: 'admin_manage' }
+                ]
+            ];
+
+            await this.bot.answerCallbackQuery(callbackQuery.id);
+            await this.bot.editMessageText(messageText, {
+                chat_id: chatId,
+                message_id: callbackQuery.message.message_id,
+                reply_markup: { inline_keyboard: keyboard }
+            });
+
         } catch (error) {
-            throw new Error(`Ошибка получения статистики: ${error.message}`);
+            console.error('Ошибка редактирования автомобиля:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', 'Попробуйте позже'),
+                show_alert: true
+            });
         }
     }
 
     /**
-     * Найти автомобили по названию
-     * @param {string} searchTerm - Поисковый запрос
-     * @returns {Promise<Array<Garage>>}
+     * Показать выбор статуса автомобиля
+     * @param {Object} callbackQuery - Callback query от Telegram
      */
-    async searchCarsByName(searchTerm) {
+    async handleStatusChange(callbackQuery) {
+        const chatId = callbackQuery.message.chat.id;
+        const carId = parseInt(callbackQuery.data.split('_')[2]);
+
         try {
-            const allCars = await this.getAllCars();
-            const searchLower = searchTerm.toLowerCase();
-            
-            return allCars.filter(car => 
-                car.car_name.toLowerCase().includes(searchLower)
+            const car = await Garage.findById(carId);
+            if (!car) {
+                await this.bot.answerCallbackQuery(callbackQuery.id, {
+                    text: this.ADMIN_MESSAGES.CAR_NOT_FOUND,
+                    show_alert: true
+                });
+                return;
+            }
+
+            const messageText = 
+                `🎨 ИЗМЕНЕНИЕ СТАТУСА\n\n` +
+                `🚗 Автомобиль: ${car.car_name}\n` +
+                `📊 Текущий статус: ${car.getDisplayName()}\n\n` +
+                `Выберите новый статус:`;
+
+            const keyboard = this.buildStatusKeyboard(carId);
+
+            await this.bot.answerCallbackQuery(callbackQuery.id);
+            await this.bot.editMessageText(messageText, {
+                chat_id: chatId,
+                message_id: callbackQuery.message.message_id,
+                reply_markup: { inline_keyboard: keyboard }
+            });
+
+        } catch (error) {
+            console.error('Ошибка изменения статуса:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', 'Попробуйте позже'),
+                show_alert: true
+            });
+        }
+    }
+
+    /**
+     * Построить клавиатуру выбора статуса
+     * @param {number} carId - ID автомобиля
+     * @returns {Array} Клавиатура
+     */
+    buildStatusKeyboard(carId) {
+        return [
+            [
+                { text: '🟢 Хорошее', callback_data: `admin_set_status_${carId}_Хорошее` }
+            ],
+            [
+                { text: '🟡 Среднее', callback_data: `admin_set_status_${carId}_Среднее` }
+            ],
+            [
+                { text: '🔴 Плохое', callback_data: `admin_set_status_${carId}_Плохое` }
+            ],
+            [
+                { text: '❌ Отмена', callback_data: `admin_edit_${carId}` }
+            ]
+        ];
+    }
+
+    /**
+     * Применить новый статус автомобиля
+     * @param {Object} callbackQuery - Callback query от Telegram
+     */
+    async handleSetStatus(callbackQuery) {
+        const chatId = callbackQuery.message.chat.id;
+        const parts = callbackQuery.data.split('_');
+        const carId = parseInt(parts[3]);
+        const newStatus = parts[4];
+
+        try {
+            const car = await Garage.findById(carId);
+            if (!car) {
+                await this.bot.answerCallbackQuery(callbackQuery.id, {
+                    text: this.ADMIN_MESSAGES.CAR_NOT_FOUND,
+                    show_alert: true
+                });
+                return;
+            }
+
+            await Garage.updateStatus(carId, newStatus);
+
+            const successMessage = this.ADMIN_MESSAGES.STATUS_UPDATED
+                .replace('{name}', car.car_name)
+                .replace('{status}', newStatus);
+
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: successMessage,
+                show_alert: false
+            });
+
+            // Возвращаемся к меню редактирования автомобиля
+            const updatedCar = await Garage.findById(carId);
+            const messageText = 
+                `🚗 РЕДАКТИРОВАНИЕ АВТОМОБИЛЯ\n\n` +
+                `📛 Название: ${updatedCar.car_name}\n` +
+                `📊 Статус: ${updatedCar.getDisplayName()}\n` +
+                `🔧 Последнее ТО: ${updatedCar.last_maintenance ? new Date(updatedCar.last_maintenance).toLocaleDateString() : 'Не указано'}`;
+
+            const keyboard = [
+                [
+                    { text: '🎨 Изменить статус', callback_data: `admin_status_${carId}` },
+                    { text: '✏️ Изменить название', callback_data: `admin_name_${carId}` }
+                ],
+                [
+                    { text: '🗑️ Удалить авто', callback_data: `admin_delete_${carId}` }
+                ],
+                [
+                    { text: '⬅️ Назад к списку', callback_data: 'admin_manage' }
+                ]
+            ];
+
+            await this.bot.editMessageText(messageText, {
+                chat_id: chatId,
+                message_id: callbackQuery.message.message_id,
+                reply_markup: { inline_keyboard: keyboard }
+            });
+
+        } catch (error) {
+            console.error('Ошибка установки статуса:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', error.message),
+                show_alert: true
+            });
+        }
+    }
+
+    /**
+     * Начать процесс добавления нового автомобиля
+     * @param {Object} callbackQuery - Callback query от Telegram
+     */
+    async handleAddCar(callbackQuery) {
+        const chatId = callbackQuery.message.chat.id;
+        const telegramId = callbackQuery.from.id;
+
+        try {
+            // Устанавливаем состояние ожидания названия
+            this.setAdminSession(telegramId, {
+                state: this.ADMIN_STATES.AWAITING_CAR_NAME,
+                messageId: callbackQuery.message.message_id
+            });
+
+            await this.bot.answerCallbackQuery(callbackQuery.id);
+            await this.bot.editMessageText(this.ADMIN_MESSAGES.ENTER_CAR_NAME, {
+                chat_id: chatId,
+                message_id: callbackQuery.message.message_id,
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '❌ Отмена', callback_data: 'admin_menu' }
+                    ]]
+                }
+            });
+
+        } catch (error) {
+            console.error('Ошибка начала добавления автомобиля:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', 'Попробуйте позже'),
+                show_alert: true
+            });
+        }
+    }
+
+    /**
+     * Обработать ввод названия нового автомобиля
+     * @param {Object} msg - Сообщение от Telegram
+     */
+    async processNewCarName(msg) {
+        const chatId = msg.chat.id;
+        const telegramId = msg.from.id;
+        const carName = msg.text.trim();
+
+        try {
+            const session = this.getAdminSession(telegramId);
+            if (!session || session.state !== this.ADMIN_STATES.AWAITING_CAR_NAME) {
+                return; // Игнорируем, если не ожидается ввод
+            }
+
+            // Валидация названия
+            if (!carName || carName.length === 0) {
+                await this.bot.sendMessage(chatId, '❌ Название автомобиля не может быть пустым. Попробуйте снова:');
+                return;
+            }
+
+            if (carName.length > 50) {
+                await this.bot.sendMessage(chatId, '❌ Название слишком длинное (максимум 50 символов). Попробуйте снова:');
+                return;
+            }
+
+            // Обновляем сессию
+            this.setAdminSession(telegramId, {
+                ...session,
+                carName: carName,
+                state: 'awaiting_status_selection'
+            });
+
+            // Показываем выбор статуса
+            const messageText = 
+                `${this.ADMIN_MESSAGES.SELECT_STATUS}\n\n` +
+                `🚗 Название: ${carName}`;
+
+            const keyboard = [
+                [
+                    { text: '🟢 Хорошее', callback_data: `admin_create_car_Хорошее` }
+                ],
+                [
+                    { text: '🟡 Среднее', callback_data: `admin_create_car_Среднее` }
+                ],
+                [
+                    { text: '🔴 Плохое', callback_data: `admin_create_car_Плохое` }
+                ],
+                [
+                    { text: '❌ Отмена', callback_data: 'admin_menu' }
+                ]
+            ];
+
+            // Удаляем исходное сообщение
+            try {
+                await this.bot.deleteMessage(chatId, session.messageId);
+            } catch (deleteError) {
+                // Игнорируем ошибку удаления
+            }
+
+            // Удаляем сообщение пользователя
+            try {
+                await this.bot.deleteMessage(chatId, msg.message_id);
+            } catch (deleteError) {
+                // Игнорируем ошибку удаления
+            }
+
+            await this.bot.sendMessage(chatId, messageText, {
+                reply_markup: { inline_keyboard: keyboard }
+            });
+
+        } catch (error) {
+            console.error('Ошибка обработки названия автомобиля:', error);
+            await this.bot.sendMessage(chatId, 
+                this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', 'Попробуйте позже')
             );
-        } catch (error) {
-            throw new Error(`Ошибка поиска автомобилей: ${error.message}`);
+            this.clearAdminSession(telegramId);
         }
     }
 
     /**
-     * Получить отчет по автомобилю
-     * @param {number} carId - ID автомобиля
-     * @returns {Promise<Object>}
+     * Создать новый автомобиль с выбранным статусом
+     * @param {Object} callbackQuery - Callback query от Telegram
      */
-    async getCarReport(carId) {
+    async handleCreateCar(callbackQuery) {
+        const chatId = callbackQuery.message.chat.id;
+        const telegramId = callbackQuery.from.id;
+        const status = callbackQuery.data.split('_')[3];
+
         try {
-            const car = await this.getCarById(carId);
-            if (!car) {
-                throw new Error('Автомобиль не найден');
+            const session = this.getAdminSession(telegramId);
+            if (!session || !session.carName) {
+                await this.bot.answerCallbackQuery(callbackQuery.id, {
+                    text: 'Ошибка сессии. Начните заново.',
+                    show_alert: true
+                });
+                return;
             }
 
-            // Получаем историю обслуживания
-            const maintenanceHistory = await car.getMaintenanceHistory();
-            
-            // Получаем активные заявки
-            const activeRequests = await GarageRequest.findByStatus('Не выплачено');
-            const carActiveRequests = activeRequests.filter(req => req.car_id === carId);
+            // Создаем автомобиль
+            const newCar = await Garage.addCar(session.carName, status);
 
-            // Статистика по заявкам
-            const allRequests = await this.getCarRequestHistory(carId);
-            const approvedRequests = allRequests.filter(req => req.payment_status === 'Принято');
-            const rejectedRequests = allRequests.filter(req => req.payment_status === 'Отклонено');
+            // Очищаем сессию
+            this.clearAdminSession(telegramId);
 
-            return {
-                car,
-                status: {
-                    current: car.status,
-                    emoji: car.getStatusEmoji(),
-                    needsMaintenance: car.isMaintenanceNeeded(),
-                    urgency: this.getUrgencyLevel(car),
-                    recommendation: this.MAINTENANCE_RECOMMENDATIONS[car.status]
-                },
-                maintenance: {
-                    lastMaintenance: car.last_maintenance,
-                    history: maintenanceHistory,
-                    totalMaintenances: maintenanceHistory.length
-                },
-                requests: {
-                    active: carActiveRequests,
-                    total: allRequests.length,
-                    approved: approvedRequests.length,
-                    rejected: rejectedRequests.length,
-                    approvalRate: allRequests.length > 0 ? 
-                        Math.round((approvedRequests.length / allRequests.length) * 100) : 0
-                }
-            };
+            const successMessage = this.ADMIN_MESSAGES.CAR_ADDED.replace('{name}', session.carName);
+
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: successMessage,
+                show_alert: false
+            });
+
+            // Показываем обновленное главное меню
+            await this.showAdminMenu(chatId);
+
         } catch (error) {
-            throw new Error(`Ошибка получения отчета по автомобилю: ${error.message}`);
+            console.error('Ошибка создания автомобиля:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', error.message),
+                show_alert: true
+            });
+            this.clearAdminSession(telegramId);
         }
     }
 
     /**
-     * Получить историю заявок по автомобилю
-     * @param {number} carId - ID автомобиля
-     * @returns {Promise<Array>}
+     * Обработать все callback queries администратора
+     * @param {Object} callbackQuery - Callback query от Telegram
      */
-    async getCarRequestHistory(carId) {
-        try {
-            // Это упрощенная версия, в реальности нужен метод в модели GarageRequest
-            const sql = `
-                SELECT gr.*, u.first_name, u.last_name, u.username
-                FROM garage_requests gr
-                JOIN users u ON gr.user_id = u.id
-                WHERE gr.car_id = ?
-                ORDER BY gr.submitted_at DESC
-            `;
-            
-            const database = require('../database/connection');
-            const rows = await database.all(sql, [carId]);
-            return rows;
-        } catch (error) {
-            throw new Error(`Ошибка получения истории заявок: ${error.message}`);
+    async handleAdminCallback(callbackQuery) {
+        const data = callbackQuery.data;
+        const telegramId = callbackQuery.from.id;
+
+        // Проверяем права администратора
+        if (!this.isAdmin(telegramId)) {
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ACCESS_DENIED,
+                show_alert: true
+            });
+            return;
         }
-    }
 
-    /**
-     * Получить рекомендации по автомобилю
-     * @param {number} carId - ID автомобиля
-     * @returns {Promise<Array<string>>}
-     */
-    async getCarRecommendations(carId) {
         try {
-            const car = await this.getCarById(carId);
-            if (!car) {
-                return [];
-            }
-
-            const recommendations = [];
-            
-            // Рекомендации по статусу
-            if (car.status === 'Плохое') {
-                recommendations.push('🚨 Срочно требуется замена масла');
-                recommendations.push('⚠️ Не рекомендуется эксплуатация без обслуживания');
-            } else if (car.status === 'Среднее') {
-                recommendations.push('⚡ Рекомендуется замена масла в ближайшие дни');
-                recommendations.push('📊 Контролируйте состояние масла');
+            // Роутинг callback queries
+            if (data === 'admin_menu') {
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                await this.showAdminMenu(callbackQuery.message.chat.id);
+            } else if (data === 'admin_manage') {
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                await this.showCarManagement(callbackQuery.message.chat.id, 0, callbackQuery.message.message_id);
+            } else if (data.startsWith('admin_manage_page_')) {
+                const page = parseInt(data.split('_')[3]);
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                await this.showCarManagement(callbackQuery.message.chat.id, page, callbackQuery.message.message_id);
+            } else if (data.startsWith('admin_edit_')) {
+                await this.handleCarEdit(callbackQuery);
+            } else if (data.startsWith('admin_status_')) {
+                await this.handleStatusChange(callbackQuery);
+            } else if (data.startsWith('admin_set_status_')) {
+                await this.handleSetStatus(callbackQuery);
+            } else if (data === 'admin_add_car') {
+                await this.handleAddCar(callbackQuery);
+            } else if (data.startsWith('admin_create_car_')) {
+                await this.handleCreateCar(callbackQuery);
             } else {
-                recommendations.push('✅ Состояние масла хорошее');
-                recommendations.push('📅 Плановое обслуживание через 7-10 дней');
+                // Неизвестный callback
+                await this.bot.answerCallbackQuery(callbackQuery.id);
             }
 
-            // Рекомендации по времени обслуживания
-            if (car.last_maintenance) {
-                const lastMaintenance = new Date(car.last_maintenance);
-                const now = new Date();
-                const daysSinceLastMaintenance = Math.floor((now - lastMaintenance) / (1000 * 60 * 60 * 24));
-                
-                if (daysSinceLastMaintenance > 30) {
-                    recommendations.push('🕐 Прошло более 30 дней с последнего обслуживания');
-                } else if (daysSinceLastMaintenance > 14) {
-                    recommendations.push('🕐 Прошло более 2 недель с последнего обслуживания');
-                }
-            } else {
-                recommendations.push('❓ Автомобиль ещё не обслуживался');
-            }
-
-            return recommendations;
         } catch (error) {
-            throw new Error(`Ошибка получения рекомендаций: ${error.message}`);
+            console.error('Ошибка обработки admin callback:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: this.ADMIN_MESSAGES.ERROR_OCCURRED.replace('{error}', 'Попробуйте позже'),
+                show_alert: true
+            });
         }
     }
 
     /**
-     * Получить топ автомобилей по количеству заявок
-     * @param {number} limit - Лимит результатов
-     * @returns {Promise<Array>}
+     * Установить сессию администратора
+     * @param {number} telegramId - ID администратора
+     * @param {Object} sessionData - Данные сессии
      */
-    async getTopCarsByRequests(limit = 5) {
-        try {
-            const sql = `
-                SELECT 
-                    g.car_id,
-                    g.car_name,
-                    g.status,
-                    COUNT(gr.id) as request_count,
-                    COUNT(CASE WHEN gr.payment_status = 'Принято' THEN 1 END) as approved_count
-                FROM garage g
-                LEFT JOIN garage_requests gr ON g.car_id = gr.car_id
-                GROUP BY g.car_id, g.car_name, g.status
-                ORDER BY request_count DESC
-                LIMIT ?
-            `;
-            
-            const database = require('../database/connection');
-            const rows = await database.all(sql, [limit]);
-            
-            return rows.map(row => ({
-                car_id: row.car_id,
-                car_name: row.car_name,
-                status: row.status,
-                request_count: row.request_count,
-                approved_count: row.approved_count,
-                approval_rate: row.request_count > 0 ? 
-                    Math.round((row.approved_count / row.request_count) * 100) : 0
-            }));
-        } catch (error) {
-            throw new Error(`Ошибка получения топа автомобилей: ${error.message}`);
-        }
+    setAdminSession(telegramId, sessionData) {
+        this.adminSessions.set(telegramId, {
+            ...sessionData,
+            startTime: Date.now()
+        });
     }
 
     /**
-     * Проверить возможность подачи заявки на автомобиль
-     * @param {number} carId - ID автомобиля
-     * @param {number} userId - ID пользователя
-     * @returns {Promise<Object>}
+     * Получить сессию администратора
+     * @param {number} telegramId - ID администратора
+     * @returns {Object|null}
      */
-    async canSubmitRequest(carId, userId) {
-        try {
-            const car = await this.getCarById(carId);
-            if (!car) {
-                return {
-                    allowed: false,
-                    reason: 'Автомобиль не найден'
-                };
-            }
+    getAdminSession(telegramId) {
+        return this.adminSessions.get(telegramId) || null;
+    }
 
-            // Проверяем, есть ли активная заявка
-            const existingRequest = await GarageRequest.findByUserAndCar(userId, carId, 'Не выплачено');
-            if (existingRequest) {
-                return {
-                    allowed: false,
-                    reason: 'У вас уже есть активная заявка для этого автомобиля'
-                };
-            }
+    /**
+     * Очистить сессию администратора
+     * @param {number} telegramId - ID администратора
+     */
+    clearAdminSession(telegramId) {
+        this.adminSessions.delete(telegramId);
+    }
 
-            // Проверяем, нужно ли обслуживание
-            if (!car.isMaintenanceNeeded()) {
-                return {
-                    allowed: true,
-                    warning: 'Автомобиль в хорошем состоянии, но вы можете подать заявку'
-                };
+    /**
+     * Очистить истекшие сессии
+     */
+    cleanupExpiredSessions() {
+        const now = Date.now();
+        for (const [telegramId, session] of this.adminSessions.entries()) {
+            if (now - session.startTime > this.SESSION_TIMEOUT) {
+                this.adminSessions.delete(telegramId);
+                console.log(`Очищена истекшая админ-сессия для пользователя ${telegramId}`);
             }
-
-            return {
-                allowed: true,
-                message: 'Автомобиль нуждается в обслуживании'
-            };
-        } catch (error) {
-            return {
-                allowed: false,
-                reason: `Ошибка проверки: ${error.message}`
-            };
         }
     }
 }

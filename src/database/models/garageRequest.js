@@ -123,6 +123,21 @@ class GarageRequest {
     }
 
     /**
+     * Подсчитать количество заявок по статусу
+     * @param {string} status - Статус для подсчета
+     * @returns {Promise<number>}
+     */
+    static async countByStatus(status) {
+        const sql = 'SELECT COUNT(*) as count FROM garage_requests WHERE payment_status = ?';
+        try {
+            const result = await database.get(sql, [status]);
+            return result.count || 0;
+        } catch (error) {
+            throw new Error(`Ошибка подсчета заявок по статусу: ${error.message}`);
+        }
+    }
+
+    /**
      * Подсчитать количество заявок пользователя за последние часы (анти-спам)
      * @param {string} telegramId - Telegram ID пользователя
      * @param {number} hours - Количество часов назад
