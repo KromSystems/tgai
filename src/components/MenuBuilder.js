@@ -465,6 +465,133 @@ support@example.com
 
         return { text, keyboard };
     }
+
+    /**
+     * Построить меню всех пользователей
+     */
+    buildAllUsersMenu(users) {
+        const totalUsers = users.length;
+        let usersList = '';
+        
+        if (totalUsers === 0) {
+            usersList = '💭 Пользователи не найдены';
+        } else {
+            users.forEach((user, index) => {
+                const status = user.authorized === 1 ? '✅ Авторизован' : '⏳ Ожидает';
+                const regDate = new Date(user.created_at).toLocaleDateString('ru-RU');
+                usersList += `${index + 1}️⃣ ${user.getDisplayName()}\n   📅 Рег: ${regDate} | ${status}\n\n`;
+            });
+        }
+
+        const text = `👥 ВСЕ ПОЛЬЗОВАТЕЛИ\n\n📊 Общая статистика:\n• Всего пользователей: ${totalUsers}\n\n${usersList}`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: `🔍 Поиск`, callback_data: 'help_admin_search_user' },
+                    { text: `📈 Экспорт`, callback_data: 'help_admin_export_users' }
+                ],
+                [
+                    { text: `${this.emojis.back} Назад`, callback_data: 'help_admin_users' }
+                ]
+            ]
+        };
+
+        return { text, keyboard };
+    }
+
+    buildPendingRequestsMenu(requests) {
+        const totalRequests = requests.length;
+        let requestsList = '';
+        
+        if (totalRequests === 0) {
+            requestsList = '✅ Все заявки обработаны!';
+        } else {
+            requests.slice(0, 5).forEach((request, index) => {
+                const submittedDate = new Date(request.submitted_at).toLocaleDateString('ru-RU');
+                requestsList += `${index + 1}️⃣ ID: ${request.telegram_id}\n   📅 Подана: ${submittedDate}\n\n`;
+            });
+        }
+
+        const text = `📋 ОЖИДАЮЩИЕ ЗАЯВКИ\n\n• Ожидающих заявок: ${totalRequests}\n\n${requestsList}`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: `✅ Обработать`, callback_data: 'help_admin_process_requests' }
+                ],
+                [
+                    { text: `${this.emojis.back} Назад`, callback_data: 'help_admin_users' }
+                ]
+            ]
+        };
+
+        return { text, keyboard };
+    }
+
+    buildAuthorizedUsersMenu(users) {
+        const totalUsers = users.length;
+        let usersList = '';
+        
+        if (totalUsers === 0) {
+            usersList = '💭 Нет авторизованных пользователей';
+        } else {
+            users.slice(0, 8).forEach((user, index) => {
+                const regDate = new Date(user.created_at).toLocaleDateString('ru-RU');
+                usersList += `${index + 1}️⃣ ${user.getDisplayName()}\n   📅 Авт.: ${regDate}\n\n`;
+            });
+        }
+
+        const text = `✅ АВТОРИЗОВАННЫЕ\n\n• Авторизованных: ${totalUsers}\n\n${usersList}`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: `📋 Полный список`, callback_data: 'help_admin_full_authorized_list' }
+                ],
+                [
+                    { text: `${this.emojis.back} Назад`, callback_data: 'help_admin_users' }
+                ]
+            ]
+        };
+
+        return { text, keyboard };
+    }
+
+    buildBlockedUsersMenu(users) {
+        const totalUsers = users.length;
+        const text = `🚫 ЗАБЛОКИРОВАННЫЕ\n\n• Заблокированных: ${totalUsers}\n\n✅ Нет заблокированных пользователей`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: `${this.emojis.back} Назад`, callback_data: 'help_admin_users' }
+                ]
+            ]
+        };
+
+        return { text, keyboard };
+    }
+
+    buildDetailedStatsMenu(stats) {
+        const uptimeHours = Math.floor(process.uptime() / 3600);
+        const memoryUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+        
+        const text = `📈 ДЕТАЛЬНАЯ СТАТИСТИКА\n\n👥 Пользователи:\n• Всего: ${stats.total || 0}\n• Авторизованных: ${stats.authorized || 0}\n• Неавторизованных: ${stats.unauthorized || 0}\n\n📊 Система:\n• Время работы: ${uptimeHours} ч\n• Память: ${memoryUsage} MB`;
+
+        const keyboard = {
+            inline_keyboard: [
+                [
+                    { text: `🔄 Обновить`, callback_data: 'help_admin_detailed_stats' }
+                ],
+                [
+                    { text: `${this.emojis.back} Назад`, callback_data: 'help_admin_users' }
+                ]
+            ]
+        };
+
+        return { text, keyboard };
+    }
 }
 
 module.exports = MenuBuilder;

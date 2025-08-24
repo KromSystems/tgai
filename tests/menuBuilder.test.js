@@ -296,9 +296,9 @@ describe('MenuBuilder', () => {
                     row.forEach(button => {
                         expect(button).toHaveProperty('text');
                         expect(button.text.length).toBeGreaterThan(0);
-                        expect(button).toSatisfy(btn => 
-                            btn.hasOwnProperty('callback_data') || btn.hasOwnProperty('url')
-                        );
+                        expect(
+                            button.hasOwnProperty('callback_data') || button.hasOwnProperty('url')
+                        ).toBe(true);
                     });
                 });
             });

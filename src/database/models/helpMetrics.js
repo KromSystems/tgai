@@ -58,6 +58,22 @@ class HelpMetrics {
     }
 
     /**
+     * Find most recent metric by Telegram ID
+     * @param {number} telegramId - Telegram user ID
+     * @returns {Promise<HelpMetrics|null>}
+     */
+    static async findRecentByTelegramId(telegramId) {
+        const sql = 'SELECT * FROM help_metrics WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 1';
+        try {
+            const row = await database.get(sql, [telegramId]);
+            return row ? new HelpMetrics(row) : null;
+        } catch (error) {
+            console.error(`Failed to find recent help metric by Telegram ID: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
      * Get usage statistics for admin dashboard
      * @param {Object} options - Query options
      * @returns {Promise<Object>}

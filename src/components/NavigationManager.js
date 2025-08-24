@@ -23,6 +23,13 @@ class NavigationManager {
             'help_admin_blocks': this.handleAdminBlocks.bind(this),
             'help_admin_backup': this.handleAdminBackup.bind(this),
             
+            // Административные функции управления пользователями
+            'help_admin_all_users': this.handleAdminAllUsers.bind(this),
+            'help_admin_pending_requests': this.handleAdminPendingRequests.bind(this),
+            'help_admin_authorized': this.handleAdminAuthorized.bind(this),
+            'help_admin_blocked': this.handleAdminBlocked.bind(this),
+            'help_admin_detailed_stats': this.handleAdminDetailedStats.bind(this),
+            
             // Пользовательские функции
             'help_user_profile': this.handleUserProfile.bind(this),
             'help_user_settings': this.handleUserSettings.bind(this),
@@ -441,6 +448,160 @@ ${stats.popular_sections.slice(0, 5).map((item, index) =>
 
     async handleRefresh(callbackQuery, user, userType, bot) {
         return this.handleMainMenu(callbackQuery, user, userType, bot);
+    }
+
+    /**
+     * Обработчик показа всех пользователей
+     */
+    async handleAdminAllUsers(callbackQuery, user, userType, bot) {
+        const chatId = callbackQuery.message.chat.id;
+        const messageId = callbackQuery.message.message_id;
+        
+        try {
+            // Получаем всех пользователей
+            const User = require('../database/models/user');
+            const allUsers = await User.findAll({ limit: 10 }); // Ограничиваем для первой страницы
+            
+            const menuData = this.menuBuilder.buildAllUsersMenu(allUsers);
+
+            await bot.editMessageText(menuData.text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: menuData.keyboard,
+                parse_mode: 'HTML'
+            });
+
+            return { notificationText: `Найдено ${allUsers.length} пользователей` };
+        } catch (error) {
+            console.error('Error in handleAdminAllUsers:', error);
+            return { notificationText: 'Ошибка загрузки пользователей' };
+        }
+    }
+
+    /**
+     * Обработчик ожидающих заявок
+     */
+    async handleAdminPendingRequests(callbackQuery, user, userType, bot) {
+        const chatId = callbackQuery.message.chat.id;
+        const messageId = callbackQuery.message.message_id;
+        
+        try {
+            const AuthRequest = require('../database/models/authRequest');
+            const pendingRequests = await AuthRequest.findPending();
+            
+            const menuData = this.menuBuilder.buildPendingRequestsMenu(pendingRequests);
+
+            await bot.editMessageText(menuData.text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: menuData.keyboard,
+                parse_mode: 'HTML'
+            });
+
+            return { notificationText: `Найдено ${pendingRequests.length} ожидающих заявок` };
+        } catch (error) {
+            console.error('Error in handleAdminPendingRequests:', error);
+            return { notificationText: 'Ошибка загрузки заявок' };
+        }
+    }
+
+    /**
+     * Обработчик авторизованных пользователей
+     */
+    async handleAdminAuthorized(callbackQuery, user, userType, bot) {
+        const chatId = callbackQuery.message.chat.id;
+        const messageId = callbackQuery.message.message_id;
+        
+        try {
+            const User = require('../database/models/user');
+            const authorizedUsers = await User.findAuthorized();
+            
+            const menuData = this.menuBuilder.buildAuthorizedUsersMenu(authorizedUsers);
+
+            await bot.editMessageText(menuData.text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: menuData.keyboard,
+                parse_mode: 'HTML'
+            });
+
+            return { notificationText: `Найдено ${authorizedUsers.length} авторизованных пользователей` };
+        } catch (error) {
+            console.error('Error in handleAdminAuthorized:', error);
+            return { notificationText: 'Ошибка загрузки авторизованных пользователей' };
+        }
+    }
+
+    /**
+     * Обработчик заблокированных пользователей
+     */
+    async handleAdminBlocked(callbackQuery, user, userType, bot) {
+        const chatId = callbackQuery.message.chat.id;
+        const messageId = callbackQuery.message.message_id;
+        
+        try {
+            // Пока нет поля blocked в базе, показываем пустой список
+            const blockedUsers = [];
+            
+            const menuData = this.menuBuilder.buildBlockedUsersMenu(blockedUsers);
+
+            await bot.editMessageText(menuData.text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: menuData.keyboard,
+                parse_mode: 'HTML'
+            });
+
+            return { notificationText: `Найдено ${blockedUsers.length} заблокированных пользователей` };
+        } catch (error) {
+            console.error('Error in handleAdminBlocked:', error);
+            return { notificationText: 'Ошибка загрузки заблокированных пользователей' };
+        }
+    }
+
+    /**
+     * Обработчик детальной статистики
+     */
+    async handleAdminDetailedStats(callbackQuery, user, userType, bot) {
+        const chatId = callbackQuery.message.chat.id;
+        const messageId = callbackQuery.message.message_id;
+        
+        try {
+            const User = require('../database/models/user');
+            const AuthRequest = require('../database/models/authRequest');
+            const HelpMetrics = require('../database/models/helpMetrics');
+            
+            // Получаем детальную статистику
+            const [totalUsers, authorizedUsers, pendingRequests, allMetrics] = await Promise.all([
+                User.findAll(),
+                User.findAuthorized(),
+                AuthRequest.findPending(),
+                HelpMetrics.findAll()
+            ]);
+            
+            const stats = {
+                total: totalUsers.length,
+                authorized: authorizedUsers.length,
+                unauthorized: totalUsers.length - authorizedUsers.length,
+                pendingRequests: pendingRequests.length,
+                blocked: 0, // TODO: implement when blocked field is added
+                helpMetrics: allMetrics.length
+            };
+            
+            const menuData = this.menuBuilder.buildDetailedStatsMenu(stats);
+
+            await bot.editMessageText(menuData.text, {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: menuData.keyboard,
+                parse_mode: 'HTML'
+            });
+
+            return { notificationText: 'Детальная статистика системы' };
+        } catch (error) {
+            console.error('Error in handleAdminDetailedStats:', error);
+            return { notificationText: 'Ошибка загрузки статистики' };
+        }
     }
 
     /**

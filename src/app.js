@@ -20,6 +20,11 @@ const MenuBuilder = require('./components/MenuBuilder');
 const UserTypeDetector = require('./components/UserTypeDetector');
 const ContentProvider = require('./components/ContentProvider');
 const NavigationManager = require('./components/NavigationManager');
+const ProfileHandler = require('./components/ProfileHandler');
+
+// Import garage components
+const GarageManager = require('./components/GarageManager');
+const AdminNotifier = require('./components/AdminNotifier');
 
 // Bot configuration
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -43,6 +48,11 @@ const menuBuilder = new MenuBuilder();
 const userTypeDetector = new UserTypeDetector(ADMIN_ID);
 const contentProvider = new ContentProvider();
 const navigationManager = new NavigationManager(menuBuilder, userTypeDetector, contentProvider);
+const profileHandler = new ProfileHandler(ADMIN_ID);
+
+// Initialize garage components
+const garageManager = new GarageManager(bot, ADMIN_ID);
+const adminNotifier = new AdminNotifier(bot, ADMIN_ID);
 
 // Conversation states for authorization flow
 const CONVERSATION_STATES = {
@@ -647,6 +657,26 @@ function setupBotHandlers() {
     // Handle /help command
     bot.onText(/\/help/, handleHelpCommand);
     
+    // Handle /profile command
+    bot.onText(/\/profile/, async (msg) => {
+        try {
+            await profileHandler.handleProfileCommand(msg, bot);
+        } catch (error) {
+            console.error('Error handling /profile command:', error);
+            await bot.sendMessage(msg.chat.id, 'Произошла ошибка при загрузке профиля. Попробуйте позже.');
+        }
+    });
+    
+    // Handle /takecar command (garage system)
+    bot.onText(/\/takecar/, async (msg) => {
+        try {
+            await garageManager.handleTakeCarCommand(msg);
+        } catch (error) {
+            console.error('Error handling /takecar command:', error);
+            await bot.sendMessage(msg.chat.id, 'Произошла ошибка при загрузке гаража. Попробуйте позже.');
+        }
+    });
+    
     // Handle callback queries (inline buttons)
     bot.on('callback_query', async (callbackQuery) => {
         const data = callbackQuery.data;
@@ -672,6 +702,20 @@ function setupBotHandlers() {
                 return;
             }
             
+            // Handle profile-related callbacks
+            const profileCallbacks = [
+                'refresh_profile', 'edit_profile', 'my_stats', 'notifications',
+                'admin_users', 'admin_analytics', 'admin_settings',
+                'submit_auth_request', 'check_auth_status'
+            ];
+            
+            if (profileCallbacks.includes(data)) {
+                const handled = await profileHandler.handleProfileCallback(callbackQuery, bot);
+                if (handled) {
+                    return;
+                }
+            }
+            
             // Handle existing authorization callbacks
             if (data === 'start_authorization') {
                 await handleAuthorizationStart(callbackQuery);
@@ -679,6 +723,22 @@ function setupBotHandlers() {
                 await handleApproval(callbackQuery);
             } else if (data.startsWith('reject_')) {
                 await handleRejection(callbackQuery);
+            }
+            // Handle garage-related callbacks
+            else if (data.startsWith('select_car_')) {
+                await garageManager.handleCarSelection(callbackQuery);
+            } else if (data.startsWith('garage_page_')) {
+                await garageManager.handlePageNavigation(callbackQuery);
+            } else if (data.startsWith('garage_approve_')) {
+                await adminNotifier.handleAdminApproval(callbackQuery);
+            } else if (data.startsWith('garage_reject_')) {
+                await adminNotifier.handleAdminRejection(callbackQuery);
+            } else if (data.startsWith('garage_details_')) {
+                await adminNotifier.handleRequestDetails(callbackQuery);
+            } else if (data === 'back_to_main') {
+                // Handle return to main menu
+                await bot.answerCallbackQuery(callbackQuery.id);
+                await handleStartCommand({ chat: { id: callbackQuery.message.chat.id }, from: callbackQuery.from });
             } else {
                 // Unknown callback
                 await bot.answerCallbackQuery(callbackQuery.id, {
@@ -706,6 +766,24 @@ function setupBotHandlers() {
         }
         
         try {
+            // Handle garage photo uploads
+            if (msg.photo) {
+                const garageSession = garageManager.getUserSession(telegramId);
+                if (garageSession && garageSession.state === garageManager.STATES.AWAITING_PHOTO) {
+                    await garageManager.handlePhotoUpload(msg);
+                    return;
+                }
+            }
+            
+            // Handle admin rejection reasons for garage
+            if (msg.text && msg.reply_to_message && msg.reply_to_message.from.is_bot) {
+                const adminSession = adminNotifier.getAdminSession(telegramId);
+                if (adminSession && adminSession.state === 'awaiting_rejection_reason') {
+                    await adminNotifier.handleRejectionReason(msg);
+                    return;
+                }
+            }
+            
             // Handle authorization flow
             if (session) {
                 if (session.state === CONVERSATION_STATES.AWAITING_NICKNAME && msg.text) {
