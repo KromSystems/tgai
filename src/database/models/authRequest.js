@@ -171,7 +171,10 @@ class AuthRequest {
      * @returns {boolean}
      */
     photoExists() {
-        return this.photo_path && fs.existsSync(this.photo_path);
+        if (!this.photo_path) {
+            return false;
+        }
+        return fs.existsSync(this.photo_path);
     }
 
     /**

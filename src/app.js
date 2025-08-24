@@ -12,6 +12,7 @@ const fs = require('fs');
 const database = require('./database/connection');
 const User = require('./database/models/user');
 const TelegramModel = require('./database/models/telegram');
+const AuthRequest = require('./database/models/authRequest');
 
 // Bot configuration
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -29,6 +30,19 @@ if (!ADMIN_ID) {
 
 // Create bot instance
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+// Conversation states for authorization flow
+const CONVERSATION_STATES = {
+    AWAITING_NICKNAME: 'awaiting_nickname',
+    AWAITING_PHOTO: 'awaiting_photo',
+    PROCESSING: 'processing'
+};
+
+// Temporary session storage for user conversations
+const userSessions = new Map();
+
+// Session timeout (30 minutes)
+const SESSION_TIMEOUT = 30 * 60 * 1000;
 
 // Image paths
 const IMAGES = {
@@ -55,6 +69,337 @@ async function initializeDatabase() {
     } catch (error) {
         console.error('Failed to connect to database:', error);
         process.exit(1);
+    }
+}
+
+/**
+ * Clean up expired sessions
+ */
+function cleanupExpiredSessions() {
+    const now = Date.now();
+    for (const [telegramId, session] of userSessions.entries()) {
+        if (now - session.startTime > SESSION_TIMEOUT) {
+            userSessions.delete(telegramId);
+            console.log(`Cleaned up expired session for user ${telegramId}`);
+        }
+    }
+}
+
+/**
+ * Set up session cleanup interval
+ */
+setInterval(cleanupExpiredSessions, 5 * 60 * 1000); // Clean up every 5 minutes
+
+/**
+ * Validate nickname format (Name_Surname)
+ * @param {string} nickname - Nickname to validate
+ * @returns {boolean}
+ */
+function validateNickname(nickname) {
+    const nicknameRegex = /^[A-Za-zА-Яа-я]+_[A-Za-zА-Яа-я]+$/;
+    return nicknameRegex.test(nickname);
+}
+
+/**
+ * Save photo file from Telegram
+ * @param {string} fileId - Telegram file ID
+ * @param {number} telegramId - User's Telegram ID
+ * @returns {Promise<string>} - Path to saved file
+ */
+async function savePhotoFile(fileId, telegramId) {
+    try {
+        const file = await bot.getFile(fileId);
+        const timestamp = Date.now();
+        const fileName = `${timestamp}_${telegramId}.jpg`;
+        const photoPath = path.join(__dirname, '..', 'photos', 'auth_requests', fileName);
+        
+        await bot.downloadFile(fileId, path.dirname(photoPath));
+        
+        // Rename the file to our desired name
+        const downloadedPath = path.join(path.dirname(photoPath), file.file_path.split('/').pop());
+        if (downloadedPath !== photoPath) {
+            fs.renameSync(downloadedPath, photoPath);
+        }
+        
+        return photoPath;
+    } catch (error) {
+        throw new Error(`Failed to save photo: ${error.message}`);
+    }
+}
+
+/**
+ * Handle authorization flow start
+ */
+async function handleAuthorizationStart(callbackQuery) {
+    const chatId = callbackQuery.message.chat.id;
+    const telegramId = callbackQuery.from.id;
+    
+    try {
+        // Check if user already has pending request
+        const existingRequest = await AuthRequest.findByTelegramId(telegramId, 'pending');
+        if (existingRequest) {
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'У вас уже есть ожидающая заявка',
+                show_alert: true
+            });
+            return;
+        }
+        
+        // Start authorization process
+        userSessions.set(telegramId, {
+            state: CONVERSATION_STATES.AWAITING_NICKNAME,
+            startTime: Date.now()
+        });
+        
+        await bot.answerCallbackQuery(callbackQuery.id);
+        await bot.sendMessage(chatId, '📝 Введите ваш никнейм в формате Name_Surname\n\nПример: Ivan_Petrov');
+        
+        console.log(`User ${telegramId} started authorization process`);
+    } catch (error) {
+        console.error('Error starting authorization:', error);
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: 'Произошла ошибка. Попробуйте позже',
+            show_alert: true
+        });
+    }
+}
+
+/**
+ * Handle nickname input
+ */
+async function handleNicknameInput(msg) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+    const nickname = msg.text.trim();
+    
+    try {
+        if (!validateNickname(nickname)) {
+            await bot.sendMessage(chatId, '❌ Неверный формат никнейма!\n\nИспользуйте формат: Name_Surname\nПример: Ivan_Petrov');
+            return;
+        }
+        
+        // Update session with nickname
+        const session = userSessions.get(telegramId);
+        session.nickname = nickname;
+        session.state = CONVERSATION_STATES.AWAITING_PHOTO;
+        userSessions.set(telegramId, session);
+        
+        await bot.sendMessage(chatId, '✅ Никнейм принят!\n\n📷 Теперь отправьте фотографию (сжатую для Telegram)\n\n📝 Инструкция: напишите /fam, затем /time и отправьте скриншот боту');
+        
+        console.log(`User ${telegramId} provided nickname: ${nickname}`);
+    } catch (error) {
+        console.error('Error handling nickname:', error);
+        await bot.sendMessage(chatId, 'Произошла ошибка. Попробуйте позже.');
+    }
+}
+
+/**
+ * Handle photo upload
+ */
+async function handlePhotoUpload(msg) {
+    const chatId = msg.chat.id;
+    const telegramId = msg.from.id;
+    
+    try {
+        const session = userSessions.get(telegramId);
+        const nickname = session.nickname;
+        
+        // Get the largest photo size
+        const photo = msg.photo[msg.photo.length - 1];
+        const photoPath = await savePhotoFile(photo.file_id, telegramId);
+        
+        // Get or create user
+        const userData = {
+            telegram_id: telegramId,
+            username: msg.from.username,
+            first_name: msg.from.first_name,
+            last_name: msg.from.last_name,
+            language_code: msg.from.language_code,
+            is_bot: msg.from.is_bot || false
+        };
+        
+        const user = await User.findOrCreate(userData);
+        
+        // Create authorization request
+        const authRequest = await AuthRequest.create({
+            user_id: user.id,
+            telegram_id: telegramId,
+            nickname: nickname,
+            photo_path: photoPath,
+            status: 'pending'
+        });
+        
+        // Update session state
+        session.state = CONVERSATION_STATES.PROCESSING;
+        userSessions.set(telegramId, session);
+        
+        // Send notification to admin
+        await sendAdminNotification(authRequest);
+        
+        // Confirm to user
+        await bot.sendMessage(chatId, '✅ Данные отправлены на проверку!\n\n🕰️ Ожидайте решения администратора...');
+        
+        // Clean up session
+        userSessions.delete(telegramId);
+        
+        console.log(`User ${telegramId} submitted authorization request with ID ${authRequest.id}`);
+    } catch (error) {
+        console.error('Error handling photo upload:', error);
+        await bot.sendMessage(chatId, 'Произошла ошибка при сохранении фотографии. Попробуйте позже.');
+    }
+}
+
+/**
+ * Send notification to admin about new authorization request
+ */
+async function sendAdminNotification(authRequest) {
+    try {
+        const user = await authRequest.getUser();
+        const photoBuffer = fs.readFileSync(authRequest.photo_path);
+        
+        const keyboard = {
+            inline_keyboard: [[
+                { text: 'Принять', callback_data: `approve_${authRequest.id}` },
+                { text: 'Отказать', callback_data: `reject_${authRequest.id}` }
+            ]]
+        };
+        
+        const caption = `📝 Новая заявка от ${authRequest.nickname}\n\n` +
+                       `🆔 Telegram ID: ${authRequest.telegram_id}\n` +
+                       `👤 Username: ${user.username ? '@' + user.username : 'Не указан'}\n` +
+                       `📅 Дата: ${new Date().toLocaleString('ru-RU')}`;
+        
+        await bot.sendPhoto(ADMIN_ID, photoBuffer, {
+            caption: caption,
+            reply_markup: keyboard
+        });
+        
+        console.log(`Admin notification sent for request ID ${authRequest.id}`);
+    } catch (error) {
+        console.error('Error sending admin notification:', error);
+        throw error;
+    }
+}
+
+/**
+ * Handle admin approval
+ */
+async function handleApproval(callbackQuery) {
+    const requestId = parseInt(callbackQuery.data.split('_')[1]);
+    
+    try {
+        const authRequest = await AuthRequest.findById(requestId);
+        if (!authRequest) {
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'Заявка не найдена',
+                show_alert: true
+            });
+            return;
+        }
+        
+        if (authRequest.status !== 'pending') {
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'Заявка уже обработана',
+                show_alert: true
+            });
+            return;
+        }
+        
+        // Update request status
+        await authRequest.updateStatus('approved', ADMIN_ID);
+        
+        // Update user authorization status
+        const user = await User.findById(authRequest.user_id);
+        await user.setAuthorized(1);
+        
+        // Notify user about approval
+        await bot.sendMessage(authRequest.telegram_id, 
+            '✅ Поздравляем! Ваша заявка одобрена!\n\n🎉 Теперь вы авторизованы в системе!');
+        
+        // Update admin message
+        await bot.editMessageCaption(
+            `✅ ОДОБРЕНО\n\n${callbackQuery.message.caption}`,
+            {
+                chat_id: callbackQuery.message.chat.id,
+                message_id: callbackQuery.message.message_id,
+                reply_markup: { inline_keyboard: [] }
+            }
+        );
+        
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: 'Заявка одобрена!'
+        });
+        
+        console.log(`Admin approved request ID ${requestId}`);
+    } catch (error) {
+        console.error('Error approving request:', error);
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: 'Ошибка при одобрении',
+            show_alert: true
+        });
+    }
+}
+
+/**
+ * Handle admin rejection
+ */
+async function handleRejection(callbackQuery) {
+    const requestId = parseInt(callbackQuery.data.split('_')[1]);
+    
+    try {
+        const authRequest = await AuthRequest.findById(requestId);
+        if (!authRequest) {
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'Заявка не найдена',
+                show_alert: true
+            });
+            return;
+        }
+        
+        if (authRequest.status !== 'pending') {
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'Заявка уже обработана',
+                show_alert: true
+            });
+            return;
+        }
+        
+        // Update request status
+        await authRequest.updateStatus('rejected', ADMIN_ID);
+        
+        // Notify user about rejection with option to reapply
+        const keyboard = {
+            inline_keyboard: [[
+                { text: 'Подать заявку повторно', callback_data: 'start_authorization' }
+            ]]
+        };
+        
+        await bot.sendMessage(authRequest.telegram_id, 
+            '❌ К сожалению, ваша заявка отклонена.\n\nВы можете подать заявку повторно.',
+            { reply_markup: keyboard }
+        );
+        
+        // Update admin message
+        await bot.editMessageCaption(
+            `❌ ОТКЛОНЕНО\n\n${callbackQuery.message.caption}`,
+            {
+                chat_id: callbackQuery.message.chat.id,
+                message_id: callbackQuery.message.message_id,
+                reply_markup: { inline_keyboard: [] }
+            }
+        );
+        
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: 'Заявка отклонена'
+        });
+        
+        console.log(`Admin rejected request ID ${requestId}`);
+    } catch (error) {
+        console.error('Error rejecting request:', error);
+        await bot.answerCallbackQuery(callbackQuery.id, {
+            text: 'Ошибка при отклонении',
+            show_alert: true
+        });
     }
 }
 
@@ -105,9 +450,16 @@ async function handleStartCommand(msg) {
                 });
                 console.log(`Authorized user ${telegramId} used /start command`);
             } else {
-                // User is not authorized - send newcomers image
+                // User is not authorized - send newcomers image with authorization button
+                const keyboard = {
+                    inline_keyboard: [[
+                        { text: 'Авторизация', callback_data: 'start_authorization' }
+                    ]]
+                };
+                
                 await bot.sendPhoto(chatId, IMAGES.NEWCOMERS, {
-                    caption: 'Добро пожаловать! Вы пока не авторизованы 🔒'
+                    caption: 'Добро пожаловать! Вы пока не авторизованы 🔒',
+                    reply_markup: keyboard
                 });
                 console.log(`Unauthorized user ${telegramId} used /start command`);
             }
@@ -125,15 +477,57 @@ function setupBotHandlers() {
     // Handle /start command
     bot.onText(/\/start/, handleStartCommand);
     
-    // Handle general messages (for future expansion)
+    // Handle callback queries (inline buttons)
+    bot.on('callback_query', async (callbackQuery) => {
+        const data = callbackQuery.data;
+        
+        try {
+            if (data === 'start_authorization') {
+                await handleAuthorizationStart(callbackQuery);
+            } else if (data.startsWith('approve_')) {
+                await handleApproval(callbackQuery);
+            } else if (data.startsWith('reject_')) {
+                await handleRejection(callbackQuery);
+            }
+        } catch (error) {
+            console.error('Error handling callback query:', error);
+            await bot.answerCallbackQuery(callbackQuery.id, {
+                text: 'Произошла ошибка',
+                show_alert: true
+            });
+        }
+    });
+    
+    // Handle general messages (for authorization flow and future expansion)
     bot.on('message', async (msg) => {
+        const telegramId = msg.from.id;
+        const session = userSessions.get(telegramId);
+        
         // Skip if it's a command (already handled above)
         if (msg.text && msg.text.startsWith('/')) {
             return;
         }
         
-        // Log all non-command messages for debugging
-        console.log(`Message from ${msg.from.id}: ${msg.text || '[non-text message]'}`);
+        try {
+            // Handle authorization flow
+            if (session) {
+                if (session.state === CONVERSATION_STATES.AWAITING_NICKNAME && msg.text) {
+                    await handleNicknameInput(msg);
+                } else if (session.state === CONVERSATION_STATES.AWAITING_PHOTO && msg.photo) {
+                    await handlePhotoUpload(msg);
+                } else if (session.state === CONVERSATION_STATES.AWAITING_PHOTO && !msg.photo) {
+                    await bot.sendMessage(msg.chat.id, '📷 Пожалуйста, отправьте фотографию.');
+                } else if (session.state === CONVERSATION_STATES.AWAITING_NICKNAME && !msg.text) {
+                    await bot.sendMessage(msg.chat.id, '📝 Пожалуйста, введите ваш никнейм.');
+                }
+            } else {
+                // Log all non-session messages for debugging
+                console.log(`Message from ${telegramId}: ${msg.text || '[non-text message]'}`);
+            }
+        } catch (error) {
+            console.error('Error handling message:', error);
+            await bot.sendMessage(msg.chat.id, 'Произошла ошибка. Попробуйте позже.');
+        }
     });
     
     // Handle polling errors
