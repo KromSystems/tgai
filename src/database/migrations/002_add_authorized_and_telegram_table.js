@@ -52,7 +52,8 @@ const migration = {
             
             for (const statement of statements) {
                 await database.run(statement.sql);
-                console.log('✓ Executed:', statement.sql.split('\n')[1].trim());
+                const logText = statement.sql.trim().split('\n')[0].trim() || statement.sql.trim();
+                console.log('✓ Executed:', logText);
             }
             
             // Record this migration
